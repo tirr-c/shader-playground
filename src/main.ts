@@ -1,11 +1,11 @@
 import { mat4, quat, vec3 } from 'wgpu-matrix';
 
 const shaderUrls = {
-  common: new URL('./common.wgsl', import.meta.url),
-  vert: new URL('./vert.wgsl', import.meta.url),
-  frag: new URL('./frag.wgsl', import.meta.url),
+  common: new URL('./assets/shaders/common.wgsl', import.meta.url),
+  vert: new URL('./assets/shaders/vert.wgsl', import.meta.url),
+  frag: new URL('./assets/shaders/frag.wgsl', import.meta.url),
 };
-const boxTextureUrl = new URL('./box.png', import.meta.url);
+const boxTextureUrl = new URL('./assets/box.png', import.meta.url);
 
 const hostVertexData = new Float32Array([
   // position, n, uv
