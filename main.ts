@@ -1,4 +1,4 @@
-import { mat4, quat, vec4 } from 'wgpu-matrix';
+import { mat4, quat, vec3 } from 'wgpu-matrix';
 
 const shaderUrl = new URL('./shaders.wgsl', import.meta.url);
 const boxTextureUrl = new URL('./box.png', import.meta.url);
@@ -135,15 +135,15 @@ async function init() {
   });
 
   const gpuUniformGlobalData = device.createBuffer({
-    // 4x4 matrix of f32 x3 (view_mat, proj_mat, proj_mat_inv)
-    size: 4 * 4 * 4 * 3,
+    // 4x4 matrix of f32 x3 (view_mat, proj_mat)
+    size: 4 * 4 * 4 * 2,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  const gpuUniformLightsData = device.createBuffer({
-    // vector of f32 + one f32, aligned to 16
-    size: 4 * (4 * 4 + 4 + 12),
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  const maxPointLights = 4;
+  const gpuPointLightsData = device.createBuffer({
+    size: 16 + maxPointLights * 32,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
   const vertexBufferSpec = [
@@ -231,7 +231,7 @@ async function init() {
       },
       {
         binding: 1,
-        resource: gpuUniformLightsData,
+        resource: gpuPointLightsData,
       },
     ],
   });
@@ -301,21 +301,28 @@ async function init() {
     canvas.width = currentWidth;
     canvas.height = currentHeight;
 
-    const timeElapsed = (performance.now() - beginTime) / 1000 / 1.5;
+    const timeElapsed = (performance.now() - beginTime) / 1000;
     const modelRot = quat.identity();
-    //quat.rotateX(modelRot, Math.cos(timeElapsed) * Math.PI / 2, modelRot);
-    //quat.rotateY(modelRot, Math.sin(timeElapsed) * Math.PI / 2, modelRot);
+    const modelRotVal = timeElapsed / 3;
+    quat.rotateX(modelRot, Math.cos(modelRotVal) * Math.PI / 2, modelRot);
+    quat.rotateY(modelRot, Math.sin(modelRotVal) * Math.PI / 2, modelRot);
     const viewMat = mat4.lookAt([3, 3, 3], [0, 0, 0], [0, 1, 0]);
     const projMat = mat4.perspective(Math.PI / 3, (canvas.width / canvas.height), 0.5, 10);
-    const projMatInv = mat4.inverse(projMat);
     const objectMat = mat4.fromQuat(modelRot);
 
+    const axis = vec3.normalize([1, 1, 1]);
+    const movingLightRotation = quat.fromAxisAngle(axis, timeElapsed * Math.PI / 2);
+    const movingLightPos = vec3.transformQuat([5, 5, -5], movingLightRotation);
     const lightPosAndIntensity = new Float32Array([
-      1, 5, 1, 1, 0, 0, 0, 0,
-      1, -5, 1, 1, 0, 0, 0, 0,
-      5, 5, 5, 1, 80, 0, 0, 0,
-      -3, -3, -3, 1, 0, 0, 0, 0,
+      // pos, color_intensity
+      5, 5, 5, 0, 80, 60, 60, 0,
+      0, 5, 0, 0, 20, 30, 20, 0,
+      5, 5, 0, 0, 30, 30, 50, 0,
     ]);
+    const numPointLights = lightPosAndIntensity.length / 8;
+    for (let i = 0; i < 3; i++) {
+      lightPosAndIntensity[i] = movingLightPos[i];
+    }
 
     device.queue.writeBuffer(
       gpuUniformObjectsData,
@@ -339,18 +346,14 @@ async function init() {
       projMat.byteLength,
     );
     device.queue.writeBuffer(
-      gpuUniformGlobalData,
-      128,
-      projMatInv.buffer,
-      projMatInv.byteOffset,
-      projMatInv.byteLength,
-    );
-    device.queue.writeBuffer(
-      gpuUniformLightsData,
+      gpuPointLightsData,
       0,
-      lightPosAndIntensity.buffer,
-      lightPosAndIntensity.byteOffset,
-      lightPosAndIntensity.byteLength,
+      new Uint32Array([numPointLights]),
+    )
+    device.queue.writeBuffer(
+      gpuPointLightsData,
+      16,
+      lightPosAndIntensity,
     );
 
     renderPassDescriptor.colorAttachments[0].resolveTarget = context.getCurrentTexture().createView();
