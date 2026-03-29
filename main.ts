@@ -1,6 +1,10 @@
 import { mat4, quat, vec3 } from 'wgpu-matrix';
 
-const shaderUrl = new URL('./shaders.wgsl', import.meta.url);
+const shaderUrls = {
+  common: new URL('./common.wgsl', import.meta.url),
+  vert: new URL('./vert.wgsl', import.meta.url),
+  frag: new URL('./frag.wgsl', import.meta.url),
+};
 const boxTextureUrl = new URL('./box.png', import.meta.url);
 
 const hostVertexData = new Float32Array([
@@ -110,9 +114,19 @@ async function loadTexture(device: GPUDevice) {
 async function init() {
   const { device, canvas, context, preferredFormat } = await initDevice();
 
-  const shadersResp = await fetch(shaderUrl);
-  const shaders = await shadersResp.text();
-  const shaderModule = device.createShaderModule({ code: shaders });
+  const shaderEntries = await Promise.all(
+    Object.entries(shaderUrls).map(async ([key, url]) => {
+      const resp = await fetch(url);
+      return [key, await resp.text()] as const;
+    }),
+  );
+  const shaders = Object.fromEntries(shaderEntries);
+  const vertShaderModule = device.createShaderModule({
+    code: shaders.common + shaders.vert,
+  });
+  const fragShaderModule = device.createShaderModule({
+    code: shaders.common + shaders.frag,
+  });
 
   const boxTexturePromise = loadTexture(device);
 
@@ -172,13 +186,13 @@ async function init() {
 
   const pipelineDescriptor = {
     vertex: {
-      module: shaderModule,
-      entryPoint: 'vertex_main',
+      module: vertShaderModule,
+      entryPoint: 'main',
       buffers: vertexBufferSpec,
     },
     fragment: {
-      module: shaderModule,
-      entryPoint: 'fragment_main',
+      module: fragShaderModule,
+      entryPoint: 'main',
       targets: [
         {
           format: navigator.gpu.getPreferredCanvasFormat(),
