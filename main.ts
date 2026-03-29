@@ -142,7 +142,7 @@ async function init() {
 
   const gpuUniformLightsData = device.createBuffer({
     // vector of f32 + one f32, aligned to 16
-    size: 4 * 4 + 4 + 12,
+    size: 4 * (4 * 4 + 4 + 12),
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -303,14 +303,19 @@ async function init() {
 
     const timeElapsed = (performance.now() - beginTime) / 1000 / 1.5;
     const modelRot = quat.identity();
-    quat.rotateX(modelRot, Math.cos(timeElapsed) * Math.PI / 2, modelRot);
-    quat.rotateY(modelRot, Math.sin(timeElapsed) * Math.PI / 2, modelRot);
+    //quat.rotateX(modelRot, Math.cos(timeElapsed) * Math.PI / 2, modelRot);
+    //quat.rotateY(modelRot, Math.sin(timeElapsed) * Math.PI / 2, modelRot);
     const viewMat = mat4.lookAt([3, 3, 3], [0, 0, 0], [0, 1, 0]);
     const projMat = mat4.perspective(Math.PI / 3, (canvas.width / canvas.height), 0.5, 10);
     const projMatInv = mat4.inverse(projMat);
     const objectMat = mat4.fromQuat(modelRot);
 
-    const lightPosAndIntensity = new Float32Array([1, 5, 1, 1, 40, 0.0]);
+    const lightPosAndIntensity = new Float32Array([
+      1, 5, 1, 1, 0, 0, 0, 0,
+      1, -5, 1, 1, 0, 0, 0, 0,
+      5, 5, 5, 1, 80, 0, 0, 0,
+      -3, -3, -3, 1, 0, 0, 0, 0,
+    ]);
 
     device.queue.writeBuffer(
       gpuUniformObjectsData,

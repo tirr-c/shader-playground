@@ -8,10 +8,9 @@ struct Uniforms {
   proj_mat_inv: mat4x4f,
 }
 
-struct Lights {
+struct Light {
   pos: vec4f,
   intensity: f32,
-  ambient: f32,
 }
 
 @group(0) @binding(0) var<uniform> objects: Objects;
@@ -19,7 +18,7 @@ struct Lights {
 @group(0) @binding(2) var boxTexture: texture_2d<f32>;
 
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
-@group(1) @binding(1) var<uniform> lights: Lights;
+@group(1) @binding(1) var<uniform> lights: array<Light, 4>;
 
 struct VertexOut {
   @builtin(position) position: vec4f,
@@ -47,31 +46,39 @@ fn vertex_main(
 // All vectors should be normalized
 fn scattering_pdf(n: vec4f, incident_ray: vec4f, scatter_ray: vec4f) -> f32 {
   let r: vec4f = reflect(incident_ray, n);
-  let diffuse_theta = max(dot(n, scatter_ray), 0.0) * 1.0;
-  let specular_theta = max(dot(r, scatter_ray), 0.0) * 0.0;
+  let diffuse_theta = max(dot(n, scatter_ray), 0.0) * 0.0;
+  let specular_theta = max(dot(r, scatter_ray), 0.0) * 1.0;
   return (diffuse_theta + specular_theta) / 3.14159265;
+}
+
+fn compute_intensity(light: Light, frag_data: VertexOut) -> f32 {
+  let light_pos_v = uniforms.view_mat * light.pos;
+  let position_v = frag_data.position_v;
+  var screen_p: vec4f = uniforms.proj_mat * position_v;
+  screen_p.z = 0.0;
+  screen_p.w = 0.5;
+  let screen_v = uniforms.proj_mat_inv * screen_p;
+
+  let n_norm = normalize(frag_data.n);
+  let light_ray_v = position_v - light_pos_v;
+  let light_ray_v_norm = normalize(light_ray_v);
+  let light_dist_sq = dot(light_ray_v, light_ray_v);
+  let light_strength = smoothstep(0.25, -0.05, dot(n_norm, light_ray_v_norm)) / light_dist_sq;
+
+  let scatter_ray_v = normalize(screen_v - position_v);
+  let pdf = scattering_pdf(n_norm, light_ray_v_norm, scatter_ray_v);
+  return pdf * (light.intensity * light_strength);
 }
 
 @fragment
 fn fragment_main(
   frag_data: VertexOut,
 ) -> @location(0) vec4f {
-  let light_pos_v: vec4f = uniforms.view_mat * lights.pos;
-  let position_v: vec4f = frag_data.position_v;
-  var screen_p: vec4f = uniforms.proj_mat * position_v;
-  screen_p.z = 0.0;
-  screen_p.w = 0.5;
-  let screen_v: vec4f = uniforms.proj_mat_inv * screen_p;
-
-  let n_norm: vec4f = normalize(frag_data.n);
-  let light_ray_v: vec4f = position_v - light_pos_v;
-  let light_ray_v_norm: vec4f = normalize(light_ray_v);
-  let light_dist_sq: f32 = dot(light_ray_v, light_ray_v);
-  let light_strength = smoothstep(0.15, -0.15, dot(n_norm, light_ray_v_norm)) / light_dist_sq;
-
-  let scatter_ray_v: vec4f = normalize(screen_v - position_v);
-  let pdf: f32 = scattering_pdf(n_norm, light_ray_v_norm, scatter_ray_v);
-  let scatter_intensity: f32 = max(pdf * (lights.intensity * light_strength), lights.ambient);
+  let i0 = compute_intensity(lights[0], frag_data);
+  let i1 = compute_intensity(lights[1], frag_data);
+  let i2 = compute_intensity(lights[2], frag_data);
+  let i3 = compute_intensity(lights[3], frag_data);
+  let scatter_intensity = i0 + i1 + i2 + i3;
 
   let albedo: vec4f = textureSample(boxTexture, boxSampler, frag_data.uv);
   let intensity: vec4f = vec4(
