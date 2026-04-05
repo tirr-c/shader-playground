@@ -9,20 +9,18 @@ struct Uniforms {
 
 struct PointLight {
   pos: vec3f,
+  dir_and_half_theta: vec4f,
   color_intensity: vec3f,
-}
-
-struct PointLights {
-  valid_len: u32,
-  data: array<PointLight>,
+  view_proj_mat: mat4x4f,
 }
 
 struct VertexOut {
   @builtin(position) position: vec4f,
   @location(0) n: vec4f,
   @location(1) position_v: vec4f,
-  @location(2) uv: vec2f,
-  @location(3) material_kind: u32,
+  @location(2) uv_or_color: vec4f,
+  @location(3) shadow_pos: vec4f,
+  @location(4) material_kind: u32,
 }
 
 const MATERIAL_LAMBERTIAN: u32 = 0;
