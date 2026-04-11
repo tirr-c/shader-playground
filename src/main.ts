@@ -81,9 +81,16 @@ if (adapter == null) {
   throw new Error('Could not request WebGPU adapter');
 }
 
+const features: GPUFeatureName[] = [];
+if (adapter.features.has('timestamp-query')) {
+  features.push('timestamp-query');
+}
+
 const preferredFormat = navigator.gpu.getPreferredCanvasFormat();
 
-const device = await adapter.requestDevice();
+const device = await adapter.requestDevice({
+  requiredFeatures: features,
+});
 
 const shaderEntries = await Promise.all(
   Object.entries(shaderUrls).map(async ([key, url]) => {
@@ -530,12 +537,12 @@ class TimestampQueryManager {
     });
 
     this.buffer = device.createBuffer({
-      size: (2 * numPointLights * 2) * 8,
+      size: this.querySet.count * 8,
       usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
     });
 
     this.mappableBuffer = device.createBuffer({
-      size: (2 * numPointLights * 2) * 8,
+      size: this.buffer.size,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
   }
@@ -546,6 +553,7 @@ class TimestampQueryManager {
     }
 
     await this.mappableBuffer.mapAsync(GPUMapMode.READ);
+
     const buffer = this.mappableBuffer.getMappedRange();
     const timestamps = new BigInt64Array(buffer);
 
@@ -559,11 +567,14 @@ class TimestampQueryManager {
         node.textContent = `render #${i / 2}: ${elapsedNs} ns`;
         info.appendChild(node);
       }
+      const node = document.createElement('div');
+      const elapsedTotalMs = Number(timestamps[timestamps.length - 1] - timestamps[0]) * 1e-6;
+      node.textContent = `render total: ${elapsedTotalMs.toFixed(2)} ms`;
+      info.appendChild(node);
     } finally {
       this.mappableBuffer.unmap();
     }
   }
-
 }
 
 const infoNode = document.getElementById('info');

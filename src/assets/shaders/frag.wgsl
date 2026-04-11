@@ -50,8 +50,9 @@ fn main(frag_data: VertexOut) -> @location(0) vec4f {
   let scatter_intensity = compute_intensity(point_light, frag_data);
 
   var albedo: vec4f;
+  let albedo_texture = textureSample(obj_texture, obj_sampler, frag_data.uv_or_color.xy);
   if (frag_data.uv_or_color.w < 0.0) {
-    albedo = textureSample(obj_texture, obj_sampler, frag_data.uv_or_color.xy);
+    albedo = albedo_texture;
   } else {
     albedo = frag_data.uv_or_color;
   }

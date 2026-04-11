@@ -20,6 +20,7 @@ struct VertexOut {
   @location(1) position_v: vec4f,
   @location(2) uv_or_color: vec4f,
   @location(3) shadow_pos: vec4f,
+  @interpolate(flat)
   @location(4) material_kind: u32,
 }
 
