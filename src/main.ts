@@ -3,8 +3,10 @@ import { mat4, quat, vec3 } from 'wgpu-matrix';
 const shaderUrls = {
   common: new URL('./assets/shaders/common.wgsl', import.meta.url),
   shadow: new URL('./assets/shaders/shadow.wgsl', import.meta.url),
-  vert: new URL('./assets/shaders/vert.wgsl', import.meta.url),
-  frag: new URL('./assets/shaders/frag.wgsl', import.meta.url),
+  gbufferVert: new URL('./assets/shaders/gbuffer-vert.wgsl', import.meta.url),
+  gbufferFrag: new URL('./assets/shaders/gbuffer-frag.wgsl', import.meta.url),
+  deferredVert: new URL('./assets/shaders/deferred-vert.wgsl', import.meta.url),
+  deferredFrag: new URL('./assets/shaders/deferred-frag.wgsl', import.meta.url),
 };
 const boxTextureUrl = new URL('./assets/box.png', import.meta.url);
 
@@ -81,7 +83,7 @@ if (adapter == null) {
   throw new Error('Could not request WebGPU adapter');
 }
 
-const features: GPUFeatureName[] = [];
+const features: GPUFeatureName[] = ['core-features-and-limits'];
 if (adapter.features.has('timestamp-query')) {
   features.push('timestamp-query');
 }
@@ -92,6 +94,7 @@ const device = await adapter.requestDevice({
   requiredFeatures: features,
 });
 
+// Shaders
 const shaderEntries = await Promise.all(
   Object.entries(shaderUrls).map(async ([key, url]) => {
     const resp = await fetch(url);
@@ -102,64 +105,78 @@ const shaders = Object.fromEntries(shaderEntries);
 const shadowShaderModule = device.createShaderModule({
   code: shaders.common + shaders.shadow,
 });
-const vertShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.vert,
+const gbufferVertShaderModule = device.createShaderModule({
+  code: shaders.common + shaders.gbufferVert,
 });
-const fragShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.frag,
+const gbufferFragShaderModule = device.createShaderModule({
+  code: shaders.common + shaders.gbufferFrag,
+});
+const deferredVertShaderModule = device.createShaderModule({
+  code: shaders.common + shaders.deferredVert,
+});
+const deferredFragShaderModule = device.createShaderModule({
+  code: shaders.common + shaders.deferredFrag,
 });
 
+
+// Geometry data
 const boxTexturePromise = loadTexture(device);
 
-const gpuVertexData = device.createBuffer({
-  size: hostVertexData.byteLength,
-  usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-});
-device.queue.writeBuffer(gpuVertexData, 0, hostVertexData);
+function createGeometry(
+  vertices: Float32Array<ArrayBuffer>,
+  indices: Uint16Array<ArrayBuffer>,
+  label: string,
+) {
+  const data = {
+    label,
+    vertices: device.createBuffer({
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    }),
+    indices: device.createBuffer({
+      size: indices.byteLength,
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    }),
+  };
 
-const gpuIndexData = device.createBuffer({
-  size: hostIndexData.byteLength,
-  usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-});
-device.queue.writeBuffer(gpuIndexData, 0, hostIndexData);
+  device.queue.writeBuffer(data.vertices, 0, vertices);
+  device.queue.writeBuffer(data.indices, 0, indices);
 
-const gpuFloorVertexData = device.createBuffer({
-  size: hostFloorVertexData.byteLength,
-  usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-});
-device.queue.writeBuffer(gpuFloorVertexData, 0, hostFloorVertexData);
+  return data;
+}
 
-const gpuFloorIndexData = device.createBuffer({
-  size: hostFloorIndexData.byteLength,
-  usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-});
-device.queue.writeBuffer(gpuFloorIndexData, 0, hostFloorIndexData);
+function createObjectUniformBuffer() {
+  return device.createBuffer({
+    // 4x4 matrix of f32
+    size: 4 * 4 * 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+}
 
-const gpuUniformObjectsData = device.createBuffer({
-  // 4x4 matrix of f32
-  size: 4 * 4 * 4,
-  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-});
+const gpuObjectBuffers = [
+  {
+    geometry: createGeometry(hostVertexData, hostIndexData, 'box'),
+    uniform: createObjectUniformBuffer(),
+  },
+  {
+    geometry: createGeometry(hostFloorVertexData, hostFloorIndexData, 'floor'),
+    uniform: createObjectUniformBuffer(),
+  },
+];
 
-const gpuUniformFloorObjectsData = device.createBuffer({
-  // 4x4 matrix of f32
-  size: 4 * 4 * 4,
-  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-});
 
+// Storages
 const gpuUniformGlobalData = device.createBuffer({
-  // 4x4 matrix of f32 x3 (view_mat, proj_mat)
-  size: 4 * 4 * 4 * 2,
+  // 4x4 matrix of f32 x3 (view_mat, view_proj_mat, view_proj_mat_inv)
+  size: 4 * 4 * 4 * 3,
   usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 
 const maxPointLights = 4;
-const gpuPointLightsData = Array(maxPointLights).fill(null).map(() => (
-  device.createBuffer({
-    size: 28 * 4,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  })
-));
+const gpuPointLightsData = device.createBuffer({
+  size: 256 + (256 * maxPointLights),
+  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+});
 
 const shadowVertexBufferSpec = [
   {
@@ -175,7 +192,7 @@ const shadowVertexBufferSpec = [
   },
 ] satisfies GPUVertexBufferLayout[];
 
-const vertexBufferSpec = [
+const gbufferVertexBufferSpec = [
   {
     attributes: [
       {
@@ -199,28 +216,10 @@ const vertexBufferSpec = [
   },
 ] satisfies GPUVertexBufferLayout[];
 
-const shadowPipeline = device.createRenderPipeline({
-  label: 'shadow',
-  vertex: {
-    module: shadowShaderModule,
-    entryPoint: 'main',
-    buffers: shadowVertexBufferSpec,
-  },
-  primitive: {
-    topology: 'triangle-list',
-    cullMode: 'back',
-  },
-  depthStencil: {
-    depthWriteEnabled: true,
-    depthCompare: 'less',
-    format: 'depth32float',
-  },
-  layout: 'auto',
-});
-
 const bglObject = device.createBindGroupLayout({
   label: 'object',
   entries: [
+    // object uniform
     {
       binding: 0,
       visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
@@ -228,16 +227,18 @@ const bglObject = device.createBindGroupLayout({
         type: 'uniform',
       },
     },
+    // albedo texture
     {
       binding: 1,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT,
       texture: {
         sampleType: 'float',
       },
     },
+    // albedo sampler
     {
       binding: 2,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT,
       sampler: {
         type: 'filtering',
       },
@@ -258,26 +259,65 @@ const bglGlobal = device.createBindGroupLayout({
   ],
 });
 
+const bglGbufferInputs = device.createBindGroupLayout({
+  label: 'gbuffer inputs',
+  entries: [
+    {
+      binding: 0,
+      visibility: GPUShaderStage.FRAGMENT,
+      texture: {
+        multisampled: true,
+        sampleType: 'unfilterable-float',
+      },
+    },
+    {
+      binding: 1,
+      visibility: GPUShaderStage.FRAGMENT,
+      texture: {
+        multisampled: true,
+        sampleType: 'unfilterable-float',
+      },
+    },
+    {
+      binding: 2,
+      visibility: GPUShaderStage.FRAGMENT,
+      texture: {
+        multisampled: true,
+        sampleType: 'uint',
+      },
+    },
+    {
+      binding: 3,
+      visibility: GPUShaderStage.FRAGMENT,
+      texture: {
+        multisampled: true,
+        sampleType: 'depth',
+      },
+    },
+  ],
+});
+
 const bglLight = device.createBindGroupLayout({
   label: 'light',
   entries: [
     {
       binding: 0,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT,
       buffer: {
-        type: 'uniform',
+        type: 'read-only-storage',
       },
     },
     {
       binding: 1,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT,
       texture: {
         sampleType: 'depth',
+        viewDimension: '2d-array',
       },
     },
     {
       binding: 2,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT,
       sampler: {
         type: 'comparison',
       },
@@ -285,32 +325,58 @@ const bglLight = device.createBindGroupLayout({
   ],
 });
 
-const renderPipeline = device.createRenderPipeline({
-  label: 'scene',
+const bglLightForShadowMap = device.createBindGroupLayout({
+  label: 'shadow map light',
+  entries: [
+    {
+      binding: 0,
+      visibility: GPUShaderStage.VERTEX,
+      buffer: {
+        type: 'uniform',
+        hasDynamicOffset: true,
+      },
+    },
+  ],
+});
+
+const shadowPipeline = device.createRenderPipeline({
+  label: 'shadow',
   vertex: {
-    module: vertShaderModule,
+    module: shadowShaderModule,
     entryPoint: 'main',
-    buffers: vertexBufferSpec,
+    buffers: shadowVertexBufferSpec,
+  },
+  primitive: {
+    topology: 'triangle-list',
+    cullMode: 'back',
+  },
+  depthStencil: {
+    depthWriteEnabled: true,
+    depthCompare: 'less',
+    format: 'depth32float',
+  },
+  layout: device.createPipelineLayout({
+    bindGroupLayouts: [bglObject, bglLightForShadowMap],
+  }),
+});
+
+const gbufferRenderPipeline = device.createRenderPipeline({
+  label: 'gbuffer',
+  vertex: {
+    module: gbufferVertShaderModule,
+    entryPoint: 'main',
+    buffers: gbufferVertexBufferSpec,
   },
   fragment: {
-    module: fragShaderModule,
+    module: gbufferFragShaderModule,
     entryPoint: 'main',
     targets: [
-      {
-        format: preferredFormat,
-        blend: {
-          alpha: {
-            operation: 'add',
-            dstFactor: 'zero',
-            srcFactor: 'one',
-          },
-          color: {
-            operation: 'add',
-            dstFactor: 'one',
-            srcFactor: 'one',
-          },
-        },
-      },
+      // albedo
+      { format: 'bgra8unorm' },
+      // normal
+      { format: 'rgba16float' },
+      // material
+      { format: 'r8uint' },
     ],
   },
   primitive: {
@@ -326,31 +392,44 @@ const renderPipeline = device.createRenderPipeline({
     count: 4,
   },
   layout: device.createPipelineLayout({
-    bindGroupLayouts: [bglObject, bglGlobal, bglLight],
+    bindGroupLayouts: [bglObject, bglGlobal],
+  }),
+});
+
+const deferredRenderPipeline = device.createRenderPipeline({
+  label: 'deferred screen',
+  vertex: {
+    module: deferredVertShaderModule,
+    entryPoint: 'main',
+  },
+  fragment: {
+    module: deferredFragShaderModule,
+    entryPoint: 'main',
+    targets: [
+      { format: preferredFormat },
+    ],
+  },
+  primitive: {
+    topology: 'triangle-list',
+    cullMode: 'back',
+  },
+  multisample: {
+    count: 4,
+  },
+  layout: device.createPipelineLayout({
+    bindGroupLayouts: [bglGlobal, bglGbufferInputs, bglLight],
   }),
 });
 
 const boxTexture = await boxTexturePromise;
 
-const shadowBindGroupObjects = [gpuUniformObjectsData, gpuUniformFloorObjectsData].map(objects => {
-  return device.createBindGroup({
-    layout: shadowPipeline.getBindGroupLayout(0),
-    entries: [
-      {
-        binding: 0,
-        resource: objects,
-      },
-    ],
-  });
-});
-
-const bindGroupObjects = [gpuUniformObjectsData, gpuUniformFloorObjectsData].map(objects => {
+const bindGroupObjects = gpuObjectBuffers.map(({ uniform }) => {
   return device.createBindGroup({
     layout: bglObject,
     entries: [
       {
         binding: 0,
-        resource: objects,
+        resource: uniform,
       },
       {
         binding: 1,
@@ -367,17 +446,18 @@ const bindGroupObjects = [gpuUniformObjectsData, gpuUniformFloorObjectsData].map
   });
 });
 
-const shadowBindGroupLights = gpuPointLightsData.map(buffer => (
-  device.createBindGroup({
-    layout: shadowPipeline.getBindGroupLayout(1),
-    entries: [
-      {
-        binding: 0,
-        resource: buffer,
+const shadowBindGroupLights = device.createBindGroup({
+  layout: bglLightForShadowMap,
+  entries: [
+    {
+      binding: 0,
+      resource: {
+        buffer: gpuPointLightsData,
+        size: 256,
       },
-    ],
-  })
-));
+    },
+  ],
+});
 
 const bindGroupGlobal = device.createBindGroup({
   layout: bglGlobal,
@@ -428,26 +508,49 @@ async function loadTexture(device: GPUDevice) {
 }
 
 function createTextures(width: number, height: number, opt?: { numShadows?: number }) {
-  const texture = device.createTexture({
+  const screen = device.createTexture({
     size: [width, height],
     format: preferredFormat,
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
     sampleCount: 4,
   });
+  const albedo = device.createTexture({
+    size: [width, height],
+    format: 'bgra8unorm',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    sampleCount: 4,
+  });
+  const normal = device.createTexture({
+    size: [width, height],
+    format: 'rgba16float',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    sampleCount: 4,
+  });
+  const material = device.createTexture({
+    size: [width, height],
+    format: 'r8uint',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    sampleCount: 4,
+  });
   const depth = device.createTexture({
     size: [width, height],
     format: 'depth24plus',
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     sampleCount: 4,
   });
-  const shadowDepth = Array(opt?.numShadows ?? 0).fill(null).map(() => (
-    device.createTexture({
-      size: [1024, 1024, 1],
+  const gbuffers = [albedo, normal, material];
+
+  const numShadows = opt?.numShadows ?? 0;
+  let shadowDepth: GPUTexture | undefined;
+  if (numShadows > 0) {
+    shadowDepth = device.createTexture({
+      dimension: '2d',
+      size: [1024, 1024, numShadows],
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
-  ));
-  return { texture, depth, shadowDepth };
+    });
+  }
+  return { screen, gbuffers, depth, shadowDepth };
 }
 
 const { canvas, context } = await initCanvas();
@@ -455,33 +558,46 @@ const { canvas, context } = await initCanvas();
 let currentWidth = canvas.width;
 let currentHeight = canvas.height;
 let oldTextures: GPUTexture[] = [];
-let { texture, depth, shadowDepth } = createTextures(currentWidth, currentHeight, { numShadows: gpuPointLightsData.length });
+let { screen, gbuffers, depth, shadowDepth } = createTextures(currentWidth, currentHeight, { numShadows: maxPointLights });
 if (!shadowDepth) {
   throw new Error();
 }
 
-const shadowDepthViews = shadowDepth.map(texture => texture.createView());
-const bindGroupPointLights: GPUBindGroup[] = [];
-const sampler = device.createSampler({ compare: 'less' });
-for (let i = 0; i < shadowDepth.length; i++) {
-  bindGroupPointLights.push(device.createBindGroup({
-    layout: bglLight,
-    entries: [
-      {
-        binding: 0,
-        resource: gpuPointLightsData[i],
-      },
-      {
-        binding: 1,
-        resource: shadowDepthViews[i],
-      },
-      {
-        binding: 2,
-        resource: sampler,
-      },
-    ],
-  }));
-}
+const shadowDepthViews = Array(shadowDepth.depthOrArrayLayers).fill(null).map((_, idx) => {
+  return shadowDepth.createView({
+    dimension: '2d',
+    baseArrayLayer: idx,
+  });
+});
+
+const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
+let bindGroupGbufferInputs = device.createBindGroup({
+  layout: bglGbufferInputs,
+  entries: gbufferViews.map((view, idx) => ({
+    binding: idx,
+    resource: view,
+  })),
+});
+
+const bindGroupPointLights = device.createBindGroup({
+  layout: bglLight,
+  entries: [
+    {
+      binding: 0,
+      resource: gpuPointLightsData,
+    },
+    {
+      binding: 1,
+      resource: shadowDepth.createView({
+        dimension: '2d-array',
+      }),
+    },
+    {
+      binding: 2,
+      resource: device.createSampler({ compare: 'less' }),
+    },
+  ],
+});
 
 const lights = [
   {
@@ -506,7 +622,9 @@ const lights = [
   },
 ];
 const numPointLights = lights.length;
-for (let i = 0; i < lights.length; i++) {
+device.queue.writeBuffer(gpuPointLightsData, 0, new Uint32Array([numPointLights]));
+
+for (let i = 0; i < numPointLights; i++) {
   const buffer = new Float32Array(28);
 
   const light = lights[i];
@@ -522,7 +640,7 @@ for (let i = 0; i < lights.length; i++) {
   buffer.set(light.colorIntensity, 8);
   buffer.set(viewProjMat, 12);
 
-  device.queue.writeBuffer(gpuPointLightsData[i], 0, buffer);
+  device.queue.writeBuffer(gpuPointLightsData, 256 + i * 256, buffer);
 }
 
 class TimestampQueryManager {
@@ -533,7 +651,7 @@ class TimestampQueryManager {
   constructor() {
     this.querySet = device.createQuerySet({
       type: 'timestamp',
-      count: 2 * numPointLights * 2,
+      count: numPointLights * 2 + 4,
     });
 
     this.buffer = device.createBuffer({
@@ -596,22 +714,32 @@ const shadowPassDescriptor = {
   timestampWrites: undefined as GPURenderPassTimestampWrites | undefined,
 } satisfies GPURenderPassDescriptor;
 
-const renderPassDescriptor = {
-  colorAttachments: [
-    {
-      loadOp: 'clear' as 'clear' | 'load',
-      storeOp: 'store',
-      clearValue: { r: 0, g: 0, b: 0, a: 0 },
-      view: texture.createView(),
-      resolveTarget: undefined as GPUTextureView | undefined,
-    },
-  ],
+const gbufferPassDescriptor = {
+  colorAttachments: gbuffers.map(texture => ({
+    loadOp: 'clear',
+    storeOp: 'store',
+    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+    view: texture.createView(),
+  })),
   depthStencilAttachment: {
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
     depthClearValue: 1.0,
     view: depth.createView(),
   },
+  timestampWrites: undefined as GPURenderPassTimestampWrites | undefined,
+} satisfies GPURenderPassDescriptor;
+
+const deferredScreenPassDescriptor = {
+  colorAttachments: [
+    {
+      loadOp: 'clear',
+      storeOp: 'store',
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      view: screen.createView(),
+      resolveTarget: undefined as GPUTextureView | undefined,
+    },
+  ],
   timestampWrites: undefined as GPURenderPassTimestampWrites | undefined,
 } satisfies GPURenderPassDescriptor;
 
@@ -627,36 +755,50 @@ const ro = new ResizeObserver(entries => {
       currentWidth = width;
       currentHeight = height;
 
-      oldTextures = [texture, depth];
-      ({ texture, depth } = createTextures(width, height));
-      renderPassDescriptor.colorAttachments[0].view = texture.createView();
-      renderPassDescriptor.depthStencilAttachment.view = depth.createView();
+      oldTextures = [screen, ...gbuffers, depth];
+      ({ screen, gbuffers, depth } = createTextures(width, height));
+      const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
+      bindGroupGbufferInputs = device.createBindGroup({
+        layout: bglGbufferInputs,
+        entries: gbufferViews.map((view, idx) => ({
+          binding: idx,
+          resource: view,
+        })),
+      });
+
+      gbufferPassDescriptor.colorAttachments = gbuffers.map(texture => ({
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        view: texture.createView(),
+      }));
+      gbufferPassDescriptor.depthStencilAttachment.view = depth.createView();
+      deferredScreenPassDescriptor.colorAttachments[0].view = screen.createView();
     }
   }
 });
 ro.observe(canvas, { box: 'device-pixel-content-box' });
 
-function createShadowBundle(bgLight: GPUBindGroup): GPURenderBundle {
+function createShadowBundle(lightIndex: number): GPURenderBundle {
   const shadowBundleEncoder = device.createRenderBundleEncoder({
-    label: `render bundle for light '${bgLight.label}'`,
+    label: `shadow map render bundle for light #${lightIndex}`,
     colorFormats: [],
     depthStencilFormat: 'depth32float',
     stencilReadOnly: true,
   });
   shadowBundleEncoder.setPipeline(shadowPipeline);
-  shadowBundleEncoder.setBindGroup(0, shadowBindGroupObjects[0]);
-  shadowBundleEncoder.setBindGroup(1, bgLight);
-  shadowBundleEncoder.setVertexBuffer(0, gpuVertexData);
-  shadowBundleEncoder.setIndexBuffer(gpuIndexData, 'uint16');
-  shadowBundleEncoder.drawIndexed(36);
-  shadowBundleEncoder.setBindGroup(0, shadowBindGroupObjects[1]);
-  shadowBundleEncoder.setVertexBuffer(0, gpuFloorVertexData);
-  shadowBundleEncoder.setIndexBuffer(gpuFloorIndexData, 'uint16');
-  shadowBundleEncoder.drawIndexed(6);
+  shadowBundleEncoder.setBindGroup(1, shadowBindGroupLights, [256 + lightIndex * 256]);
+  for (let i = 0; i < gpuObjectBuffers.length; i++) {
+    const { vertices, indices } = gpuObjectBuffers[i].geometry;
+    shadowBundleEncoder.setBindGroup(0, bindGroupObjects[i]);
+    shadowBundleEncoder.setVertexBuffer(0, vertices);
+    shadowBundleEncoder.setIndexBuffer(indices, 'uint16');
+    shadowBundleEncoder.drawIndexed(indices.size / 2);
+  }
   return shadowBundleEncoder.finish();
 }
 
-const shadowRenderBundles = shadowBindGroupLights.map(createShadowBundle);
+const shadowRenderBundles = Array(maxPointLights).fill(null).map((_, idx) => createShadowBundle(idx));
 
 const beginTime = performance.now();
 function render() {
@@ -668,20 +810,23 @@ function render() {
   const modelRotVal = timeElapsed / 3;
   quat.rotateX(modelRot, Math.cos(modelRotVal) * Math.PI / 2, modelRot);
   quat.rotateY(modelRot, Math.sin(modelRotVal) * Math.PI / 2, modelRot);
-  const viewMat = mat4.lookAt([0, 6, 5], [0, 0, 0], [0, 1, 0]);
-  const projMat = mat4.perspective(Math.PI / 3, (canvas.width / canvas.height), 0.5, 50);
   const objectMat = mat4.fromQuat(modelRot);
   const floorObjectMat = mat4.multiply(mat4.translation([0, -4, 0]), mat4.scaling([5, 5, 5]));
 
+  const viewMat = mat4.lookAt([0, 6, 5], [0, 0, 0], [0, 1, 0]);
+  const projMat = mat4.perspective(Math.PI / 3, (canvas.width / canvas.height), 0.5, 50);
+  const viewProjMat = mat4.multiply(projMat, viewMat);
+  const viewProjMatInv = mat4.inverse(viewProjMat);
+
   device.queue.writeBuffer(
-    gpuUniformObjectsData,
+    gpuObjectBuffers[0].uniform,
     0,
     objectMat.buffer,
     objectMat.byteOffset,
     objectMat.byteLength,
   );
   device.queue.writeBuffer(
-    gpuUniformFloorObjectsData,
+    gpuObjectBuffers[1].uniform,
     0,
     floorObjectMat.buffer,
     floorObjectMat.byteOffset,
@@ -697,9 +842,16 @@ function render() {
   device.queue.writeBuffer(
     gpuUniformGlobalData,
     64,
-    projMat.buffer,
-    projMat.byteOffset,
-    projMat.byteLength,
+    viewProjMat.buffer,
+    viewProjMat.byteOffset,
+    viewProjMat.byteLength,
+  );
+  device.queue.writeBuffer(
+    gpuUniformGlobalData,
+    128,
+    viewProjMatInv.buffer,
+    viewProjMatInv.byteOffset,
+    viewProjMatInv.byteLength,
   );
 
   const commandEncoder = device.createCommandEncoder();
@@ -721,38 +873,46 @@ function render() {
 
   const timestampQueryIndexBase = 2 * numPointLights;
   {
-    renderPassDescriptor.colorAttachments[0].resolveTarget = context.getCurrentTexture().createView();
-    for (let i = 0; i < numPointLights; i++) {
-      if (timestampManager) {
-        renderPassDescriptor.timestampWrites = {
-          querySet: timestampManager.querySet,
-          beginningOfPassWriteIndex: timestampQueryIndexBase + 2 * i,
-          endOfPassWriteIndex: timestampQueryIndexBase + 2 * i + 1,
-        };
-      }
-
-      if (i === 0) {
-        renderPassDescriptor.colorAttachments[0].loadOp = 'clear';
-      } else {
-        renderPassDescriptor.colorAttachments[0].loadOp = 'load';
-      }
-      const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-      passEncoder.setPipeline(renderPipeline);
-
-      passEncoder.setBindGroup(1, bindGroupGlobal);
-      passEncoder.setBindGroup(2, bindGroupPointLights[i]);
-
-      passEncoder.setBindGroup(0, bindGroupObjects[0]);
-      passEncoder.setVertexBuffer(0, gpuVertexData);
-      passEncoder.setIndexBuffer(gpuIndexData, 'uint16');
-      passEncoder.drawIndexed(36);
-      passEncoder.setBindGroup(0, bindGroupObjects[1]);
-      passEncoder.setVertexBuffer(0, gpuFloorVertexData);
-      passEncoder.setIndexBuffer(gpuFloorIndexData, 'uint16');
-      passEncoder.drawIndexed(6);
-
-      passEncoder.end();
+    if (timestampManager) {
+      gbufferPassDescriptor.timestampWrites = {
+        querySet: timestampManager.querySet,
+        beginningOfPassWriteIndex: timestampQueryIndexBase,
+        endOfPassWriteIndex: timestampQueryIndexBase + 1,
+      };
     }
+
+    const passEncoder = commandEncoder.beginRenderPass(gbufferPassDescriptor);
+    passEncoder.setPipeline(gbufferRenderPipeline);
+    passEncoder.setBindGroup(1, bindGroupGlobal);
+
+    for (let i = 0; i < gpuObjectBuffers.length; i++) {
+      const { vertices, indices } = gpuObjectBuffers[i].geometry;
+      passEncoder.setBindGroup(0, bindGroupObjects[i]);
+      passEncoder.setVertexBuffer(0, vertices);
+      passEncoder.setIndexBuffer(indices, 'uint16');
+      passEncoder.drawIndexed(indices.size / 2);
+    }
+
+    passEncoder.end();
+  }
+
+  {
+    deferredScreenPassDescriptor.colorAttachments[0].resolveTarget = context.getCurrentTexture().createView();
+    if (timestampManager) {
+      deferredScreenPassDescriptor.timestampWrites = {
+        querySet: timestampManager.querySet,
+        beginningOfPassWriteIndex: timestampQueryIndexBase + 2,
+        endOfPassWriteIndex: timestampQueryIndexBase + 3,
+      };
+    }
+
+    const passEncoder = commandEncoder.beginRenderPass(deferredScreenPassDescriptor);
+    passEncoder.setPipeline(deferredRenderPipeline);
+    passEncoder.setBindGroup(0, bindGroupGlobal);
+    passEncoder.setBindGroup(1, bindGroupGbufferInputs);
+    passEncoder.setBindGroup(2, bindGroupPointLights);
+    passEncoder.draw(6);
+    passEncoder.end();
   }
 
   if (timestampManager) {
