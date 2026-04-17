@@ -173,8 +173,12 @@ const gpuUniformGlobalData = device.createBuffer({
 });
 
 const maxPointLights = 4;
+const gpuNumPointLights = device.createBuffer({
+  size: 4,
+  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+});
 const gpuPointLightsData = device.createBuffer({
-  size: 256 + (256 * maxPointLights),
+  size: 256 * maxPointLights,
   usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 
@@ -304,11 +308,18 @@ const bglLight = device.createBindGroupLayout({
       binding: 0,
       visibility: GPUShaderStage.FRAGMENT,
       buffer: {
-        type: 'read-only-storage',
+        type: 'uniform',
       },
     },
     {
       binding: 1,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: {
+        type: 'read-only-storage',
+      },
+    },
+    {
+      binding: 2,
       visibility: GPUShaderStage.FRAGMENT,
       texture: {
         sampleType: 'depth',
@@ -316,7 +327,7 @@ const bglLight = device.createBindGroupLayout({
       },
     },
     {
-      binding: 2,
+      binding: 3,
       visibility: GPUShaderStage.FRAGMENT,
       sampler: {
         type: 'comparison',
@@ -584,16 +595,20 @@ const bindGroupPointLights = device.createBindGroup({
   entries: [
     {
       binding: 0,
-      resource: gpuPointLightsData,
+      resource: gpuNumPointLights,
     },
     {
       binding: 1,
+      resource: gpuPointLightsData,
+    },
+    {
+      binding: 2,
       resource: shadowDepth.createView({
         dimension: '2d-array',
       }),
     },
     {
-      binding: 2,
+      binding: 3,
       resource: device.createSampler({ compare: 'less' }),
     },
   ],
@@ -622,7 +637,7 @@ const lights = [
   },
 ];
 const numPointLights = lights.length;
-device.queue.writeBuffer(gpuPointLightsData, 0, new Uint32Array([numPointLights]));
+device.queue.writeBuffer(gpuNumPointLights, 0, new Uint32Array([numPointLights]));
 
 for (let i = 0; i < numPointLights; i++) {
   const buffer = new Float32Array(28);
@@ -640,7 +655,7 @@ for (let i = 0; i < numPointLights; i++) {
   buffer.set(light.colorIntensity, 8);
   buffer.set(viewProjMat, 12);
 
-  device.queue.writeBuffer(gpuPointLightsData, 256 + i * 256, buffer);
+  device.queue.writeBuffer(gpuPointLightsData, i * 256, buffer);
 }
 
 class TimestampQueryManager {
@@ -787,7 +802,7 @@ function createShadowBundle(lightIndex: number): GPURenderBundle {
     stencilReadOnly: true,
   });
   shadowBundleEncoder.setPipeline(shadowPipeline);
-  shadowBundleEncoder.setBindGroup(1, shadowBindGroupLights, [256 + lightIndex * 256]);
+  shadowBundleEncoder.setBindGroup(1, shadowBindGroupLights, [lightIndex * 256]);
   for (let i = 0; i < gpuObjectBuffers.length; i++) {
     const { vertices, indices } = gpuObjectBuffers[i].geometry;
     shadowBundleEncoder.setBindGroup(0, bindGroupObjects[i]);

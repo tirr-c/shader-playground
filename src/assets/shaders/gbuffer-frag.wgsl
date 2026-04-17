@@ -20,7 +20,7 @@ fn main(frag_data: GBufferVertexOut) -> GBufferFragOut {
     output.albedo = frag_data.uv_or_color;
   }
 
-  output.normal = frag_data.n;
+  output.normal = normalize(frag_data.normal_w);
   output.material = frag_data.material_kind;
 
   return output;

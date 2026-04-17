@@ -1,9 +1,3 @@
-struct PointLights {
-  num_valid: u32,
-  @align(256)
-  data: array<PointLight>,
-}
-
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
 @group(1) @binding(0) var gbuffer_albedo: texture_multisampled_2d<f32>;
@@ -11,24 +5,25 @@ struct PointLights {
 @group(1) @binding(2) var gbuffer_material: texture_multisampled_2d<u32>;
 @group(1) @binding(3) var gbuffer_depth: texture_depth_multisampled_2d;
 
-@group(2) @binding(0) var<storage, read> point_lights: PointLights;
-@group(2) @binding(1) var shadow_texture: texture_depth_2d_array;
-@group(2) @binding(2) var shadow_sampler: sampler_comparison;
+@group(2) @binding(0) var<uniform> num_point_lights: u32;
+@group(2) @binding(1) var<storage, read> point_lights: array<PointLight>;
+@group(2) @binding(2) var shadow_texture: texture_depth_2d_array;
+@group(2) @binding(3) var shadow_sampler: sampler_comparison;
 
 fn world_from_screen(pos_screen: vec2f, depth: f32) -> vec3f {
-  let pos_clip = vec4(pos_screen.x * 2.0 - 1.0, (1.0 - pos_screen.y) * 2.0 - 1.0, depth, 1.0);
+  let pos_clip_xy = (vec2(0.5) - pos_screen.xy) * vec2(-2.0, 2.0);
+  let pos_clip = vec4(pos_clip_xy, depth, 1.0);
   let pos_world_w = uniforms.view_proj_mat_inv * pos_clip;
   let pos_world = pos_world_w.xyz / pos_world_w.www;
   return pos_world;
 }
 
 // All vectors should be normalized
-fn scattering_pdf(material: u32, n: vec4f, incident_ray: vec4f, scatter_ray: vec4f) -> f32 {
+fn scattering_pdf(material: u32, normal_w: vec3f, incident_w: vec3f) -> f32 {
   switch (material) {
     case MATERIAL_LAMBERTIAN: {
       // Lambertian diffuse material
-      let diffuse_theta = max(dot(n, scatter_ray), 0.0);
-      return diffuse_theta / 3.14159265;
+      return max(dot(normal_w, -incident_w), 0.0) / 3.14159265;
     }
     default: {
       return 0.0;
@@ -38,31 +33,29 @@ fn scattering_pdf(material: u32, n: vec4f, incident_ray: vec4f, scatter_ray: vec
 
 fn compute_intensity(
   light: PointLight,
-  pos_world: vec3f,
-  normal: vec3f,
+  pos_w: vec3f,
+  normal_w: vec3f,
   material: u32,
 ) -> vec3f {
-  let light_pos_v = uniforms.view_mat * vec4(light.pos, 1.0);
-  let light_dir_v = uniforms.view_mat * vec4(light.dir_and_half_theta.xyz, 0.0);
-  let light_dir_v_norm = normalize(light_dir_v);
+  let light_pos_w = light.pos;
+  let light_dir_w = light.dir_and_half_theta.xyz;
+  let light_dir_w_norm = normalize(light_dir_w);
   let light_half_theta_upper_cos = cos(light.dir_and_half_theta.w);
   let light_half_theta_lower_cos = cos(light.dir_and_half_theta.w * 1.1);
-  let position_v = uniforms.view_mat * vec4f(pos_world, 1.0);
+  let position_w = pos_w;
 
-  let n_norm = vec4f(normalize(normal), 0.0);
-  let light_ray_v = position_v - light_pos_v;
-  let light_ray_v_norm = normalize(light_ray_v);
+  let n_norm_w = normal_w; // Assumed to be normalized
+  let light_ray_w = position_w - light_pos_w;
+  let light_ray_w_norm = normalize(light_ray_w);
+
   let spotlight_strength = smoothstep(
     light_half_theta_lower_cos,
     light_half_theta_upper_cos,
-    dot(light_ray_v_norm, light_dir_v_norm),
+    dot(light_ray_w_norm, light_dir_w_norm),
   );
-  let light_dist_sq = dot(light_ray_v, light_ray_v);
-  let light_strength = spotlight_strength * max(dot(n_norm, -light_ray_v_norm), 0.0) / light_dist_sq;
-
-  //let scatter_ray_v = normalize(-position_v);
-  let scatter_ray_v = vec4(0.0, 0.0, 1.0, 0.0);
-  let pdf = scattering_pdf(material, n_norm, light_ray_v_norm, scatter_ray_v);
+  let light_dist_sq = dot(light_ray_w, light_ray_w);
+  let light_strength = spotlight_strength / light_dist_sq;
+  let pdf = scattering_pdf(material, n_norm_w, light_ray_w_norm);
   return light.color_intensity * (pdf * light_strength);
 }
 
@@ -86,9 +79,9 @@ fn main(
 
   let buffer_size = textureDimensions(gbuffer_depth);
   let pos_screen = position.xy / vec2f(buffer_size);
-  let pos_world = world_from_screen(pos_screen, depth);
+  let pos_w = world_from_screen(pos_screen, depth);
 
-  let normal = textureLoad(
+  let normal_w = textureLoad(
     gbuffer_normal,
     gbuffer_sample_pos,
     sample_index,
@@ -105,21 +98,21 @@ fn main(
   ).x;
 
   var intensity: vec3f = vec3f(0.0);
-  for (var light_idx: u32 = 0; light_idx < point_lights.num_valid; light_idx += 1) {
-    let light = point_lights.data[light_idx];
-    let scatter_intensity = compute_intensity(light, pos_world, normal, material);
+  for (var light_idx: u32 = 0; light_idx < num_point_lights; light_idx += 1) {
+    let light = point_lights[light_idx];
+    let scatter_intensity = compute_intensity(light, pos_w, normal_w, material);
 
     // Sample from shadow map with perspective correction
-    let shadow_pos_raw = light.view_proj_mat * vec4f(pos_world, 1.0);
+    let shadow_pos_raw = light.view_proj_mat * vec4f(pos_w, 1.0);
     let shadow_pos = shadow_pos_raw.xyz / shadow_pos_raw.www;
     let shadow_xy = shadow_pos.xy * vec2(0.5, -0.5) + vec2(0.5);
-    let light_depth = shadow_pos.z;
+    let light_depth = shadow_pos.z - 0.001;
     let visibility = textureSampleCompare(
       shadow_texture,
       shadow_sampler,
       shadow_xy,
       light_idx,
-      light_depth - 0.001,
+      light_depth,
     );
 
     intensity += scatter_intensity * visibility;
