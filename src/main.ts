@@ -1,73 +1,10 @@
 import { mat4, quat, vec3 } from 'wgpu-matrix';
 
-const shaderUrls = {
-  common: new URL('./assets/shaders/common.wgsl', import.meta.url),
-  shadow: new URL('./assets/shaders/shadow.wgsl', import.meta.url),
-  gbufferVert: new URL('./assets/shaders/gbuffer-vert.wgsl', import.meta.url),
-  gbufferFrag: new URL('./assets/shaders/gbuffer-frag.wgsl', import.meta.url),
-  deferredVert: new URL('./assets/shaders/deferred-vert.wgsl', import.meta.url),
-  deferredFrag: new URL('./assets/shaders/deferred-frag.wgsl', import.meta.url),
-};
+import { createBindGroupLayouts, loadShaders } from './shaders.js';
+import { box, floor } from './geometry.js';
+import { TimestampQueryManager } from './timestamp.js';
+
 const boxTextureUrl = new URL('./assets/box.png', import.meta.url);
-
-const hostVertexData = new Float32Array([
-  // position, n, uv_or_color
-  // front
-  -1, 1, 1, 1,    0, 0, 1, 0,   0, 0, 0, -1,
-  1, 1, 1, 1,     0, 0, 1, 0,   1, 0, 0, -1,
-  -1, -1, 1, 1,   0, 0, 1, 0,   0, 1, 0, -1,
-  1, -1, 1, 1,    0, 0, 1, 0,   1, 1, 0, -1,
-  // right
-  1, 1, 1, 1,     1, 0, 0, 0,   0, 0, 0, -1,
-  1, 1, -1, 1,    1, 0, 0, 0,   1, 0, 0, -1,
-  1, -1, 1, 1,    1, 0, 0, 0,   0, 1, 0, -1,
-  1, -1, -1, 1,   1, 0, 0, 0,   1, 1, 0, -1,
-  // back
-  1, 1, -1, 1,    0, 0, -1, 0,  0, 0, 0, -1,
-  -1, 1, -1, 1,   0, 0, -1, 0,  1, 0, 0, -1,
-  1, -1, -1, 1,   0, 0, -1, 0,  0, 1, 0, -1,
-  -1, -1, -1, 1,  0, 0, -1, 0,  1, 1, 0, -1,
-  // left
-  -1, 1, -1, 1,   -1, 0, 0, 0,  0, 0, 0, -1,
-  -1, 1, 1, 1,    -1, 0, 0, 0,  1, 0, 0, -1,
-  -1, -1, -1, 1,  -1, 0, 0, 0,  0, 1, 0, -1,
-  -1, -1, 1, 1,   -1, 0, 0, 0,  1, 1, 0, -1,
-  // top
-  -1, 1, -1, 1,   0, 1, 0, 0,   0, 0, 0, -1,
-  1, 1, -1, 1,    0, 1, 0, 0,   1, 0, 0, -1,
-  -1, 1, 1, 1,    0, 1, 0, 0,   0, 1, 0, -1,
-  1, 1, 1, 1,     0, 1, 0, 0,   1, 1, 0, -1,
-  // bottom
-  -1, -1, 1, 1,   0, -1, 0, 0,  0, 0, 0, -1,
-  1, -1, 1, 1,    0, -1, 0, 0,  1, 0, 0, -1,
-  -1, -1, -1, 1,  0, -1, 0, 0,  0, 1, 0, -1,
-  1, -1, -1, 1,   0, -1, 0, 0,  1, 1, 0, -1,
-]);
-const hostIndexData = new Uint16Array([
-  // front
-  2, 1, 0, 1, 2, 3,
-  // right
-  6, 5, 4, 5, 6, 7,
-  // back
-  10, 9, 8, 9, 10, 11,
-  // left
-  14, 13, 12, 13, 14, 15,
-  // top
-  18, 17, 16, 17, 18, 19,
-  // bottom
-  22, 21, 20, 21, 22, 23,
-]);
-
-const hostFloorVertexData = new Float32Array([
-  // position, n, uv_or_color
-  -1, 0, -1, 1,   0, 1, 0, 0,   1, 1, 1, 1,
-  1, 0, -1, 1,    0, 1, 0, 0,   1, 1, 1, 1,
-  -1, 0, 1, 1,    0, 1, 0, 0,   1, 1, 1, 1,
-  1, 0, 1, 1,     0, 1, 0, 0,   1, 1, 1, 1,
-]);
-const hostFloorIndexData = new Uint16Array([
-  2, 1, 0, 1, 2, 3,
-]);
 
 if (!navigator.gpu) {
   throw new Error('WebGPU not supported');
@@ -94,58 +31,15 @@ const device = await adapter.requestDevice({
   requiredFeatures: features,
 });
 
-// Shaders
-const shaderEntries = await Promise.all(
-  Object.entries(shaderUrls).map(async ([key, url]) => {
-    const resp = await fetch(url);
-    return [key, await resp.text()] as const;
-  }),
-);
-const shaders = Object.fromEntries(shaderEntries);
-const shadowShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.shadow,
-});
-const gbufferVertShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.gbufferVert,
-});
-const gbufferFragShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.gbufferFrag,
-});
-const deferredVertShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.deferredVert,
-});
-const deferredFragShaderModule = device.createShaderModule({
-  code: shaders.common + shaders.deferredFrag,
-});
+const numMultisamples = 4;
 
+// Shaders
+const shaderModules = await loadShaders(device);
 
 // Geometry data
 const boxTexturePromise = loadTexture(device);
 
-function createGeometry(
-  vertices: Float32Array<ArrayBuffer>,
-  indices: Uint16Array<ArrayBuffer>,
-  label: string,
-) {
-  const data = {
-    label,
-    vertices: device.createBuffer({
-      size: vertices.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    }),
-    indices: device.createBuffer({
-      size: indices.byteLength,
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-    }),
-  };
-
-  device.queue.writeBuffer(data.vertices, 0, vertices);
-  device.queue.writeBuffer(data.indices, 0, indices);
-
-  return data;
-}
-
-function createObjectUniformBuffer() {
+export function createObjectUniformBuffer(device: GPUDevice) {
   return device.createBuffer({
     // 4x4 matrix of f32
     size: 4 * 4 * 4,
@@ -155,12 +49,12 @@ function createObjectUniformBuffer() {
 
 const gpuObjectBuffers = [
   {
-    geometry: createGeometry(hostVertexData, hostIndexData, 'box'),
-    uniform: createObjectUniformBuffer(),
+    geometry: box.createGeometryBuffers(device),
+    uniform: createObjectUniformBuffer(device),
   },
   {
-    geometry: createGeometry(hostFloorVertexData, hostFloorIndexData, 'floor'),
-    uniform: createObjectUniformBuffer(),
+    geometry: floor.createGeometryBuffers(device),
+    uniform: createObjectUniformBuffer(device),
   },
 ];
 
@@ -220,140 +114,12 @@ const gbufferVertexBufferSpec = [
   },
 ] satisfies GPUVertexBufferLayout[];
 
-const bglObject = device.createBindGroupLayout({
-  label: 'object',
-  entries: [
-    // object uniform
-    {
-      binding: 0,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-      buffer: {
-        type: 'uniform',
-      },
-    },
-    // albedo texture
-    {
-      binding: 1,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        sampleType: 'float',
-      },
-    },
-    // albedo sampler
-    {
-      binding: 2,
-      visibility: GPUShaderStage.FRAGMENT,
-      sampler: {
-        type: 'filtering',
-      },
-    },
-  ],
-});
-
-const bglGlobal = device.createBindGroupLayout({
-  label: 'global',
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-      buffer: {
-        type: 'uniform',
-      },
-    },
-  ],
-});
-
-const bglGbufferInputs = device.createBindGroupLayout({
-  label: 'gbuffer inputs',
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        multisampled: true,
-        sampleType: 'unfilterable-float',
-      },
-    },
-    {
-      binding: 1,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        multisampled: true,
-        sampleType: 'unfilterable-float',
-      },
-    },
-    {
-      binding: 2,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        multisampled: true,
-        sampleType: 'uint',
-      },
-    },
-    {
-      binding: 3,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        multisampled: true,
-        sampleType: 'depth',
-      },
-    },
-  ],
-});
-
-const bglLight = device.createBindGroupLayout({
-  label: 'light',
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.FRAGMENT,
-      buffer: {
-        type: 'uniform',
-      },
-    },
-    {
-      binding: 1,
-      visibility: GPUShaderStage.FRAGMENT,
-      buffer: {
-        type: 'read-only-storage',
-      },
-    },
-    {
-      binding: 2,
-      visibility: GPUShaderStage.FRAGMENT,
-      texture: {
-        sampleType: 'depth',
-        viewDimension: '2d-array',
-      },
-    },
-    {
-      binding: 3,
-      visibility: GPUShaderStage.FRAGMENT,
-      sampler: {
-        type: 'comparison',
-      },
-    },
-  ],
-});
-
-const bglLightForShadowMap = device.createBindGroupLayout({
-  label: 'shadow map light',
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.VERTEX,
-      buffer: {
-        type: 'uniform',
-        hasDynamicOffset: true,
-      },
-    },
-  ],
-});
+const bgl = createBindGroupLayouts(device);
 
 const shadowPipeline = device.createRenderPipeline({
   label: 'shadow',
   vertex: {
-    module: shadowShaderModule,
+    module: shaderModules.shadow,
     entryPoint: 'main',
     buffers: shadowVertexBufferSpec,
   },
@@ -367,19 +133,19 @@ const shadowPipeline = device.createRenderPipeline({
     format: 'depth32float',
   },
   layout: device.createPipelineLayout({
-    bindGroupLayouts: [bglObject, bglLightForShadowMap],
+    bindGroupLayouts: [bgl.object, bgl.lightForShadowMap],
   }),
 });
 
 const gbufferRenderPipeline = device.createRenderPipeline({
   label: 'gbuffer',
   vertex: {
-    module: gbufferVertShaderModule,
+    module: shaderModules.gbufferVert,
     entryPoint: 'main',
     buffers: gbufferVertexBufferSpec,
   },
   fragment: {
-    module: gbufferFragShaderModule,
+    module: shaderModules.gbufferFrag,
     entryPoint: 'main',
     targets: [
       // albedo
@@ -400,21 +166,21 @@ const gbufferRenderPipeline = device.createRenderPipeline({
     format: 'depth24plus',
   },
   multisample: {
-    count: 4,
+    count: numMultisamples,
   },
   layout: device.createPipelineLayout({
-    bindGroupLayouts: [bglObject, bglGlobal],
+    bindGroupLayouts: [bgl.object, bgl.global],
   }),
 });
 
 const deferredRenderPipeline = device.createRenderPipeline({
   label: 'deferred screen',
   vertex: {
-    module: deferredVertShaderModule,
+    module: shaderModules.deferredVert,
     entryPoint: 'main',
   },
   fragment: {
-    module: deferredFragShaderModule,
+    module: shaderModules.deferredFrag,
     entryPoint: 'main',
     targets: [
       { format: preferredFormat },
@@ -425,10 +191,10 @@ const deferredRenderPipeline = device.createRenderPipeline({
     cullMode: 'back',
   },
   multisample: {
-    count: 4,
+    count: numMultisamples,
   },
   layout: device.createPipelineLayout({
-    bindGroupLayouts: [bglGlobal, bglGbufferInputs, bglLight],
+    bindGroupLayouts: [bgl.global, bgl.gbufferInputs, bgl.light],
   }),
 });
 
@@ -436,7 +202,7 @@ const boxTexture = await boxTexturePromise;
 
 const bindGroupObjects = gpuObjectBuffers.map(({ uniform }) => {
   return device.createBindGroup({
-    layout: bglObject,
+    layout: bgl.object,
     entries: [
       {
         binding: 0,
@@ -458,7 +224,7 @@ const bindGroupObjects = gpuObjectBuffers.map(({ uniform }) => {
 });
 
 const shadowBindGroupLights = device.createBindGroup({
-  layout: bglLightForShadowMap,
+  layout: bgl.lightForShadowMap,
   entries: [
     {
       binding: 0,
@@ -471,7 +237,7 @@ const shadowBindGroupLights = device.createBindGroup({
 });
 
 const bindGroupGlobal = device.createBindGroup({
-  layout: bglGlobal,
+  layout: bgl.global,
   entries: [
     {
       binding: 0,
@@ -523,31 +289,31 @@ function createTextures(width: number, height: number, opt?: { numShadows?: numb
     size: [width, height],
     format: preferredFormat,
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    sampleCount: 4,
+    sampleCount: numMultisamples,
   });
   const albedo = device.createTexture({
     size: [width, height],
     format: 'bgra8unorm',
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    sampleCount: 4,
+    sampleCount: numMultisamples,
   });
   const normal = device.createTexture({
     size: [width, height],
     format: 'rgba16float',
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    sampleCount: 4,
+    sampleCount: numMultisamples,
   });
   const material = device.createTexture({
     size: [width, height],
     format: 'r8uint',
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    sampleCount: 4,
+    sampleCount: numMultisamples,
   });
   const depth = device.createTexture({
     size: [width, height],
     format: 'depth24plus',
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    sampleCount: 4,
+    sampleCount: numMultisamples,
   });
   const gbuffers = [albedo, normal, material];
 
@@ -583,7 +349,7 @@ const shadowDepthViews = Array(shadowDepth.depthOrArrayLayers).fill(null).map((_
 
 const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
 let bindGroupGbufferInputs = device.createBindGroup({
-  layout: bglGbufferInputs,
+  layout: bgl.gbufferInputs,
   entries: gbufferViews.map((view, idx) => ({
     binding: idx,
     resource: view,
@@ -591,7 +357,7 @@ let bindGroupGbufferInputs = device.createBindGroup({
 });
 
 const bindGroupPointLights = device.createBindGroup({
-  layout: bglLight,
+  layout: bgl.light,
   entries: [
     {
       binding: 0,
@@ -658,62 +424,10 @@ for (let i = 0; i < numPointLights; i++) {
   device.queue.writeBuffer(gpuPointLightsData, i * 256, buffer);
 }
 
-class TimestampQueryManager {
-  public querySet: GPUQuerySet;
-  public buffer: GPUBuffer;
-  public mappableBuffer: GPUBuffer;
-
-  constructor() {
-    this.querySet = device.createQuerySet({
-      type: 'timestamp',
-      count: numPointLights * 2 + 4,
-    });
-
-    this.buffer = device.createBuffer({
-      size: this.querySet.count * 8,
-      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-    });
-
-    this.mappableBuffer = device.createBuffer({
-      size: this.buffer.size,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-  }
-
-  async retrieveAndShowTimestamps(info: HTMLElement) {
-    if (this.mappableBuffer.mapState !== 'unmapped') {
-      return;
-    }
-
-    await this.mappableBuffer.mapAsync(GPUMapMode.READ);
-
-    const buffer = this.mappableBuffer.getMappedRange();
-    const timestamps = new BigInt64Array(buffer);
-
-    try {
-      info.innerHTML = '';
-      for (let i = 0; i < timestamps.length; i += 2) {
-        const begin = timestamps[i];
-        const end = timestamps[i + 1];
-        const elapsedNs = Number(end - begin);
-        const node = document.createElement('div');
-        node.textContent = `render #${i / 2}: ${elapsedNs} ns`;
-        info.appendChild(node);
-      }
-      const node = document.createElement('div');
-      const elapsedTotalMs = Number(timestamps[timestamps.length - 1] - timestamps[0]) * 1e-6;
-      node.textContent = `render total: ${elapsedTotalMs.toFixed(2)} ms`;
-      info.appendChild(node);
-    } finally {
-      this.mappableBuffer.unmap();
-    }
-  }
-}
-
 const infoNode = document.getElementById('info');
 let timestampManager: TimestampQueryManager | undefined;
 if (device.features.has('timestamp-query')) {
-  timestampManager = new TimestampQueryManager();
+  timestampManager = new TimestampQueryManager(device);
 } else if (infoNode) {
   infoNode.textContent = 'timestamp query not supported';
 }
@@ -774,7 +488,7 @@ const ro = new ResizeObserver(entries => {
       ({ screen, gbuffers, depth } = createTextures(width, height));
       const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
       bindGroupGbufferInputs = device.createBindGroup({
-        layout: bglGbufferInputs,
+        layout: bgl.gbufferInputs,
         entries: gbufferViews.map((view, idx) => ({
           binding: idx,
           resource: view,
@@ -820,7 +534,9 @@ function render() {
   canvas.width = currentWidth;
   canvas.height = currentHeight;
 
-  const timeElapsed = (performance.now() - beginTime) / 1000;
+  const renderBeginTime = performance.now();
+
+  const timeElapsed = (renderBeginTime - beginTime) / 1000;
   const modelRot = quat.identity();
   const modelRotVal = timeElapsed / 3;
   quat.rotateX(modelRot, Math.cos(modelRotVal) * Math.PI / 2, modelRot);
@@ -873,11 +589,11 @@ function render() {
 
   for (let i = 0; i < numPointLights; i++) {
     shadowPassDescriptor.depthStencilAttachment.view = shadowDepthViews[i];
-    if (timestampManager) {
+    shadowPassDescriptor.timestampWrites = undefined;
+    if (timestampManager && i === 0) {
       shadowPassDescriptor.timestampWrites = {
         querySet: timestampManager.querySet,
-        beginningOfPassWriteIndex: 2 * i,
-        endOfPassWriteIndex: 2 * i + 1,
+        beginningOfPassWriteIndex: 0,
       };
     }
 
@@ -886,15 +602,8 @@ function render() {
     passEncoder.end();
   }
 
-  const timestampQueryIndexBase = 2 * numPointLights;
   {
-    if (timestampManager) {
-      gbufferPassDescriptor.timestampWrites = {
-        querySet: timestampManager.querySet,
-        beginningOfPassWriteIndex: timestampQueryIndexBase,
-        endOfPassWriteIndex: timestampQueryIndexBase + 1,
-      };
-    }
+    gbufferPassDescriptor.timestampWrites = undefined;
 
     const passEncoder = commandEncoder.beginRenderPass(gbufferPassDescriptor);
     passEncoder.setPipeline(gbufferRenderPipeline);
@@ -913,11 +622,11 @@ function render() {
 
   {
     deferredScreenPassDescriptor.colorAttachments[0].resolveTarget = context.getCurrentTexture().createView();
+    deferredScreenPassDescriptor.timestampWrites = undefined;
     if (timestampManager) {
       deferredScreenPassDescriptor.timestampWrites = {
         querySet: timestampManager.querySet,
-        beginningOfPassWriteIndex: timestampQueryIndexBase + 2,
-        endOfPassWriteIndex: timestampQueryIndexBase + 3,
+        endOfPassWriteIndex: 1,
       };
     }
 
@@ -948,7 +657,11 @@ function render() {
   }
 
   const commandBuffer = commandEncoder.finish();
+
   device.queue.submit([commandBuffer]);
+
+  const elapsedHostMs = performance.now() - renderBeginTime;
+  timestampManager?.setElapsedHost(elapsedHostMs);
 
   if (infoNode) {
     timestampManager?.retrieveAndShowTimestamps(infoNode);
