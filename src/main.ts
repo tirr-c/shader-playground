@@ -51,10 +51,12 @@ const gpuObjectBuffers = [
   {
     geometry: box.createGeometryBuffers(device),
     uniform: createObjectUniformBuffer(device),
+    material: 0,
   },
   {
     geometry: floor.createGeometryBuffers(device),
     uniform: createObjectUniformBuffer(device),
+    material: 0,
   },
 ];
 
@@ -72,8 +74,16 @@ const gpuNumPointLights = device.createBuffer({
   usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 const gpuPointLightsData = device.createBuffer({
-  size: 256 * maxPointLights,
-  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  size: 128 * maxPointLights,
+  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+});
+const gpuPointLightIndices = Array(maxPointLights).fill(null).map((_, idx) => {
+  const buffer = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(buffer, 0, new Uint32Array([idx]));
+  return buffer;
 });
 
 const shadowVertexBufferSpec = [
@@ -152,8 +162,6 @@ const gbufferRenderPipeline = device.createRenderPipeline({
       { format: 'bgra8unorm' },
       // normal
       { format: 'rgba16float' },
-      // material
-      { format: 'r8uint' },
     ],
   },
   primitive: {
@@ -163,7 +171,8 @@ const gbufferRenderPipeline = device.createRenderPipeline({
   depthStencil: {
     depthWriteEnabled: true,
     depthCompare: 'less',
-    format: 'depth24plus',
+    stencilFront: { passOp: 'replace' },
+    format: 'depth24plus-stencil8',
   },
   multisample: {
     count: numMultisamples,
@@ -223,18 +232,25 @@ const bindGroupObjects = gpuObjectBuffers.map(({ uniform }) => {
   });
 });
 
-const shadowBindGroupLights = device.createBindGroup({
-  layout: bgl.lightForShadowMap,
-  entries: [
-    {
-      binding: 0,
-      resource: {
-        buffer: gpuPointLightsData,
-        size: 256,
+const shadowBindGroupLights = gpuPointLightIndices.map(index => (
+  device.createBindGroup({
+    layout: bgl.lightForShadowMap,
+    entries: [
+      {
+        binding: 0,
+        resource: {
+          buffer: index,
+        },
       },
-    },
-  ],
-});
+      {
+        binding: 1,
+        resource: {
+          buffer: gpuPointLightsData,
+        },
+      },
+    ],
+  })
+));
 
 const bindGroupGlobal = device.createBindGroup({
   layout: bgl.global,
@@ -303,19 +319,23 @@ function createTextures(width: number, height: number, opt?: { numShadows?: numb
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     sampleCount: numMultisamples,
   });
-  const material = device.createTexture({
-    size: [width, height],
-    format: 'r8uint',
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    sampleCount: numMultisamples,
-  });
   const depth = device.createTexture({
     size: [width, height],
-    format: 'depth24plus',
+    format: 'depth24plus-stencil8',
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     sampleCount: numMultisamples,
   });
-  const gbuffers = [albedo, normal, material];
+  const gbuffers = [albedo, normal];
+  const gbufferInputs = [
+    albedo.createView(),
+    normal.createView(),
+    depth.createView({
+      aspect: 'depth-only',
+    }),
+    depth.createView({
+      aspect: 'stencil-only',
+    }),
+  ];
 
   const numShadows = opt?.numShadows ?? 0;
   let shadowDepth: GPUTexture | undefined;
@@ -327,7 +347,7 @@ function createTextures(width: number, height: number, opt?: { numShadows?: numb
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
   }
-  return { screen, gbuffers, depth, shadowDepth };
+  return { screen, depth, gbuffers, gbufferInputs, shadowDepth };
 }
 
 const { canvas, context } = await initCanvas();
@@ -335,7 +355,7 @@ const { canvas, context } = await initCanvas();
 let currentWidth = canvas.width;
 let currentHeight = canvas.height;
 let oldTextures: GPUTexture[] = [];
-let { screen, gbuffers, depth, shadowDepth } = createTextures(currentWidth, currentHeight, { numShadows: maxPointLights });
+let { screen, depth, gbuffers, gbufferInputs, shadowDepth } = createTextures(currentWidth, currentHeight, { numShadows: maxPointLights });
 if (!shadowDepth) {
   throw new Error();
 }
@@ -347,10 +367,9 @@ const shadowDepthViews = Array(shadowDepth.depthOrArrayLayers).fill(null).map((_
   });
 });
 
-const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
 let bindGroupGbufferInputs = device.createBindGroup({
   layout: bgl.gbufferInputs,
-  entries: gbufferViews.map((view, idx) => ({
+  entries: gbufferInputs.map((view, idx) => ({
     binding: idx,
     resource: view,
   })),
@@ -411,7 +430,7 @@ for (let i = 0; i < numPointLights; i++) {
   const light = lights[i];
   const viewMatInv = mat4.inverse(light.viewMat);
   const pos = vec3.transformMat4([0, 0, 0], viewMatInv);
-  const dir = vec3.transformMat4Upper3x3([0, 0, -1], viewMatInv);
+  const dir = vec3.normalize(vec3.transformMat4Upper3x3([0, 0, -1], viewMatInv));
   const projMat = mat4.perspective(light.halfTheta * 2, 1, 0.1, 20);
   const viewProjMat = mat4.multiply(projMat, light.viewMat);
 
@@ -421,7 +440,7 @@ for (let i = 0; i < numPointLights; i++) {
   buffer.set(light.colorIntensity, 8);
   buffer.set(viewProjMat, 12);
 
-  device.queue.writeBuffer(gpuPointLightsData, i * 256, buffer);
+  device.queue.writeBuffer(gpuPointLightsData, i * 128, buffer);
 }
 
 const infoNode = document.getElementById('info');
@@ -448,13 +467,15 @@ const gbufferPassDescriptor = {
     loadOp: 'clear',
     storeOp: 'store',
     clearValue: { r: 0, g: 0, b: 0, a: 0 },
-    view: texture.createView(),
+    view: texture,
   })),
   depthStencilAttachment: {
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
     depthClearValue: 1.0,
-    view: depth.createView(),
+    stencilLoadOp: 'clear',
+    stencilStoreOp: 'store',
+    view: depth,
   },
   timestampWrites: undefined as GPURenderPassTimestampWrites | undefined,
 } satisfies GPURenderPassDescriptor;
@@ -465,7 +486,7 @@ const deferredScreenPassDescriptor = {
       loadOp: 'clear',
       storeOp: 'store',
       clearValue: { r: 0, g: 0, b: 0, a: 0 },
-      view: screen.createView(),
+      view: screen,
       resolveTarget: undefined as GPUTextureView | undefined,
     },
   ],
@@ -484,12 +505,11 @@ const ro = new ResizeObserver(entries => {
       currentWidth = width;
       currentHeight = height;
 
-      oldTextures = [screen, ...gbuffers, depth];
-      ({ screen, gbuffers, depth } = createTextures(width, height));
-      const gbufferViews = [...gbuffers, depth].map(texture => texture.createView());
+      oldTextures = [screen, depth, ...gbuffers];
+      ({ screen, depth, gbuffers, gbufferInputs } = createTextures(width, height));
       bindGroupGbufferInputs = device.createBindGroup({
         layout: bgl.gbufferInputs,
-        entries: gbufferViews.map((view, idx) => ({
+        entries: gbufferInputs.map((view, idx) => ({
           binding: idx,
           resource: view,
         })),
@@ -499,10 +519,10 @@ const ro = new ResizeObserver(entries => {
         loadOp: 'clear',
         storeOp: 'store',
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        view: texture.createView(),
+        view: texture,
       }));
-      gbufferPassDescriptor.depthStencilAttachment.view = depth.createView();
-      deferredScreenPassDescriptor.colorAttachments[0].view = screen.createView();
+      gbufferPassDescriptor.depthStencilAttachment.view = depth;
+      deferredScreenPassDescriptor.colorAttachments[0].view = screen;
     }
   }
 });
@@ -516,7 +536,7 @@ function createShadowBundle(lightIndex: number): GPURenderBundle {
     stencilReadOnly: true,
   });
   shadowBundleEncoder.setPipeline(shadowPipeline);
-  shadowBundleEncoder.setBindGroup(1, shadowBindGroupLights, [lightIndex * 256]);
+  shadowBundleEncoder.setBindGroup(1, shadowBindGroupLights[lightIndex]);
   for (let i = 0; i < gpuObjectBuffers.length; i++) {
     const { vertices, indices } = gpuObjectBuffers[i].geometry;
     shadowBundleEncoder.setBindGroup(0, bindGroupObjects[i]);
@@ -611,6 +631,7 @@ function render() {
 
     for (let i = 0; i < gpuObjectBuffers.length; i++) {
       const { vertices, indices } = gpuObjectBuffers[i].geometry;
+      passEncoder.setStencilReference(gpuObjectBuffers[i].material);
       passEncoder.setBindGroup(0, bindGroupObjects[i]);
       passEncoder.setVertexBuffer(0, vertices);
       passEncoder.setIndexBuffer(indices, 'uint16');

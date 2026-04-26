@@ -6,7 +6,6 @@
 struct GBufferFragOut {
   @location(0) albedo: vec4f,
   @location(1) normal: vec4f,
-  @location(2) material: u32,
 }
 
 @fragment
@@ -19,9 +18,7 @@ fn main(frag_data: GBufferVertexOut) -> GBufferFragOut {
   } else {
     output.albedo = frag_data.uv_or_color;
   }
-
   output.normal = normalize(frag_data.normal_w);
-  output.material = frag_data.material_kind;
 
   return output;
 }

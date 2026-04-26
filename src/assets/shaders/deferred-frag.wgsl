@@ -2,8 +2,8 @@
 
 @group(1) @binding(0) var gbuffer_albedo: texture_multisampled_2d<f32>;
 @group(1) @binding(1) var gbuffer_normal: texture_multisampled_2d<f32>;
-@group(1) @binding(2) var gbuffer_material: texture_multisampled_2d<u32>;
-@group(1) @binding(3) var gbuffer_depth: texture_depth_multisampled_2d;
+@group(1) @binding(2) var gbuffer_depth: texture_depth_multisampled_2d;
+@group(1) @binding(3) var gbuffer_material: texture_multisampled_2d<u32>;
 
 @group(2) @binding(0) var<uniform> num_point_lights: u32;
 @group(2) @binding(1) var<storage, read> point_lights: array<PointLight>;
@@ -34,18 +34,15 @@ fn scattering_pdf(material: u32, normal_w: vec3f, incident_w: vec3f) -> f32 {
 fn compute_intensity(
   light: PointLight,
   pos_w: vec3f,
-  normal_w: vec3f,
+  normal_w_norm: vec3f,
   material: u32,
 ) -> vec3f {
   let light_pos_w = light.pos;
-  let light_dir_w = light.dir_and_half_theta.xyz;
-  let light_dir_w_norm = normalize(light_dir_w);
+  let light_dir_w_norm = light.dir_and_half_theta.xyz;
   let light_half_theta_upper_cos = cos(light.dir_and_half_theta.w);
   let light_half_theta_lower_cos = cos(light.dir_and_half_theta.w * 1.1);
-  let position_w = pos_w;
 
-  let n_norm_w = normal_w; // Assumed to be normalized
-  let light_ray_w = position_w - light_pos_w;
+  let light_ray_w = pos_w - light_pos_w;
   let light_ray_w_norm = normalize(light_ray_w);
 
   let spotlight_strength = smoothstep(
@@ -55,7 +52,7 @@ fn compute_intensity(
   );
   let light_dist_sq = dot(light_ray_w, light_ray_w);
   let light_strength = spotlight_strength / light_dist_sq;
-  let pdf = scattering_pdf(material, n_norm_w, light_ray_w_norm);
+  let pdf = scattering_pdf(material, normal_w_norm, light_ray_w_norm);
   return light.color_intensity * (pdf * light_strength);
 }
 
@@ -71,7 +68,6 @@ fn main(
     gbuffer_sample_pos,
     sample_index,
   );
-
   // Don't light the sky
   if (depth >= 1.0) {
     discard;
@@ -100,7 +96,6 @@ fn main(
   var intensity: vec3f = vec3f(0.0);
   for (var light_idx: u32 = 0; light_idx < num_point_lights; light_idx += 1) {
     let light = point_lights[light_idx];
-    let scatter_intensity = compute_intensity(light, pos_w, normal_w, material);
 
     // Sample from shadow map with perspective correction
     let shadow_pos_raw = light.view_proj_mat * vec4f(pos_w, 1.0);
@@ -115,7 +110,12 @@ fn main(
       light_depth,
     );
 
-    intensity += scatter_intensity * visibility;
+    var local_intensity = vec3(0.0);
+    if (visibility > 0.0) {
+      local_intensity = compute_intensity(light, pos_w, normal_w, material) * visibility;
+    }
+
+    intensity += local_intensity;
   }
 
   return albedo * vec4f(intensity, 1.0);

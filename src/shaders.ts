@@ -109,7 +109,7 @@ export function createBindGroupLayouts(device: GPUDevice) {
           visibility: GPUShaderStage.FRAGMENT,
           texture: {
             multisampled: true,
-            sampleType: 'uint',
+            sampleType: 'depth',
           },
         },
         {
@@ -117,7 +117,7 @@ export function createBindGroupLayouts(device: GPUDevice) {
           visibility: GPUShaderStage.FRAGMENT,
           texture: {
             multisampled: true,
-            sampleType: 'depth',
+            sampleType: 'uint',
           },
         },
       ],
@@ -166,7 +166,13 @@ export function createBindGroupLayouts(device: GPUDevice) {
           visibility: GPUShaderStage.VERTEX,
           buffer: {
             type: 'uniform',
-            hasDynamicOffset: true,
+          },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: {
+            type: 'read-only-storage',
           },
         },
       ],

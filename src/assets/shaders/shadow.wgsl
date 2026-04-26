@@ -1,9 +1,10 @@
 @group(0) @binding(0) var<uniform> objects: Objects;
-@group(1) @binding(0) var<uniform> point_light: PointLight;
+@group(1) @binding(0) var<uniform> point_light_idx: u32;
+@group(1) @binding(1) var<storage, read> point_lights: array<PointLight>;
 
 @vertex
 fn main(
   @location(0) position: vec4f,
 ) -> @builtin(position) vec4f {
-  return point_light.view_proj_mat * objects.mat * position;
+  return point_lights[point_light_idx].view_proj_mat * objects.mat * position;
 }

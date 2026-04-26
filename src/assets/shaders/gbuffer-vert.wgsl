@@ -11,6 +11,5 @@ fn main(
   output.position = uniforms.view_proj_mat * objects.mat * position;
   output.normal_w = objects.mat * normal;
   output.uv_or_color = uv_or_color;
-  output.material_kind = MATERIAL_LAMBERTIAN;
   return output;
 }
